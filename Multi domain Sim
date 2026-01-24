@@ -1,0 +1,433 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Pause, RotateCcw, Zap } from 'lucide-react';
+
+const MultiDomainSimulator = () => {
+  const canvasRefs = {
+    active: useRef(null),
+    utilization: useRef(null),
+    phases: useRef(null),
+    coherence: useRef(null),
+    coupling: useRef(null),
+    conservation: useRef(null)
+  };
+
+  const [isRunning, setIsRunning] = useState(false);
+  const [t, setT] = useState(0);
+  const [nDomains] = useState(5);
+  const [total] = useState(100);
+  
+  // Domain states
+  const [domains, setDomains] = useState(() => 
+    Array(5).fill(0).map(() => ({
+      active: Math.random() * 10,
+      dormant: Math.random() * 10,
+      capacity: 25,
+      priority: 0.5 + Math.random() * 1.5
+    }))
+  );
+
+  // System state
+  const [phases, setPhases] = useState(() => 
+    Array(5).fill(0).map(() => Math.random() * 2 * Math.PI)
+  );
+  const [beta, setBeta] = useState(() => {
+    const b = Array(5).fill(0).map(() => Array(5).fill(0.1));
+    for(let i = 0; i < 5; i++) b[i][i] = 0;
+    return b;
+  });
+  
+  // History for plotting
+  const [history, setHistory] = useState({
+    time: [],
+    active: [[], [], [], [], []],
+    utilization: [],
+    phases: [[], [], [], [], []],
+    coherence: [],
+    coupling: [],
+    conservation: []
+  });
+
+  // Droplet memory
+  const [droplets, setDroplets] = useState([]);
+
+  // Helper functions
+  const normalize = (arr, targetSum = total) => {
+    const sum = arr.reduce((a, b) => a + b, 0);
+    return sum > 0 ? arr.map(x => x * targetSum / sum) : arr;
+  };
+
+  const getUtilization = (domain) => {
+    return domain.active / (domain.active + domain.dormant + 1e-10);
+  };
+
+  const getPhaseCoherence = (phases) => {
+    let sum = 0;
+    let count = 0;
+    for(let i = 0; i < phases.length; i++) {
+      for(let j = i + 1; j < phases.length; j++) {
+        sum += Math.abs(Math.cos(phases[i] - phases[j]));
+        count++;
+      }
+    }
+    return count > 0 ? sum / count : 0;
+  };
+
+  const getConservationError = (domains) => {
+    const currentTotal = domains.reduce((sum, d) => sum + d.active + d.dormant, 0);
+    return Math.abs(currentTotal - total);
+  };
+
+  // Main simulation step
+  const step = (dt = 0.1) => {
+    setDomains(prevDomains => {
+      const newDomains = prevDomains.map(d => ({...d}));
+      
+      // 1. Update coupling based on correlations and phase coherence
+      const newBeta = beta.map(row => [...row]);
+      for(let i = 0; i < nDomains; i++) {
+        for(let j = 0; j < nDomains; j++) {
+          if(i !== j) {
+            const phaseDiff = Math.abs(phases[i] - phases[j]);
+            const phaseFactor = Math.cos(phaseDiff);
+            const delta = 0.01 * phaseFactor * (1 - newBeta[i][j]);
+            newBeta[i][j] = Math.max(0, Math.min(1, newBeta[i][j] + delta));
+          }
+        }
+      }
+      setBeta(newBeta);
+
+      // 2. Apply fiber transforms with phase modulation
+      for(let i = 0; i < nDomains; i++) {
+        const phaseMod = Math.sin(phases[i] + 2 * Math.PI * t);
+        for(let j = 0; j < nDomains; j++) {
+          if(i !== j) {
+            const baseTransfer = 0.1 / (nDomains - 1);
+            const modTransfer = baseTransfer * (1 + 0.1 * phaseMod);
+            const transfer = modTransfer * newDomains[i].active * dt;
+            
+            newDomains[i].active -= transfer;
+            newDomains[j].dormant += transfer * 0.5;
+            newDomains[j].active += transfer * 0.5;
+          }
+        }
+      }
+
+      // 3. Apply domain coupling
+      for(let i = 0; i < nDomains; i++) {
+        for(let j = 0; j < nDomains; j++) {
+          if(i !== j && newBeta[i][j] > 0) {
+            const priorityDiff = Math.abs(newDomains[i].priority - newDomains[j].priority);
+            const couplingStrength = newBeta[i][j] * Math.exp(-priorityDiff);
+            const transfer = couplingStrength * dt * newDomains[i].active;
+            
+            newDomains[i].active -= transfer;
+            newDomains[j].active += transfer * 0.7;
+            newDomains[j].dormant += transfer * 0.3;
+          }
+        }
+      }
+
+      // 4. Apply hierarchical constraints
+      newDomains.forEach(domain => {
+        const domainTotal = domain.active + domain.dormant;
+        if(domainTotal > domain.capacity) {
+          const scale = domain.capacity / (domainTotal + 1e-10);
+          domain.active *= scale;
+          domain.dormant *= scale;
+        }
+
+        if(domain.priority > 1.0) {
+          const bonus = (domain.priority - 1.0) * 0.1;
+          domain.active *= (1 + bonus);
+          domain.dormant *= (1 - bonus * 0.5);
+        }
+      });
+
+      // 5. Project to feasible set (conservation)
+      const allValues = newDomains.flatMap(d => [d.active, d.dormant]);
+      const normalized = normalize(allValues.map(v => Math.max(0, v)), total);
+      
+      let idx = 0;
+      newDomains.forEach(domain => {
+        domain.active = normalized[idx++];
+        domain.dormant = normalized[idx++];
+      });
+
+      // 6. Update phases (Kuramoto-like)
+      setPhases(prevPhases => {
+        const newPhases = [...prevPhases];
+        for(let i = 0; i < nDomains; i++) {
+          let phaseSum = 0;
+          for(let j = 0; j < nDomains; j++) {
+            if(i !== j) {
+              const syncStrength = newBeta[i][j] * 0.1;
+              phaseSum += syncStrength * Math.sin(newPhases[j] - newPhases[i]);
+            }
+          }
+          const naturalFreq = getUtilization(newDomains[i]) * 0.5;
+          newPhases[i] = (newPhases[i] + dt * (naturalFreq + phaseSum)) % (2 * Math.PI);
+        }
+        return newPhases;
+      });
+
+      // 7. Store droplet periodically
+      if(Math.floor(t) !== Math.floor(t + dt) && t % 2 < 1) {
+        setDroplets(prev => {
+          const newDroplets = [...prev];
+          if(newDroplets.length >= 50) newDroplets.shift();
+          newDroplets.push({
+            timestamp: t,
+            active: newDomains.map(d => d.active),
+            dormant: newDomains.map(d => d.dormant),
+            coherence: getPhaseCoherence(phases)
+          });
+          return newDroplets;
+        });
+      }
+
+      // 8. Inject memory if coherent
+      if(droplets.length > 0 && getPhaseCoherence(phases) > 0.8) {
+        const recent = droplets.slice(-3);
+        recent.forEach(droplet => {
+          if(droplet.coherence > 0.8) {
+            const blendFactor = 0.05;
+            newDomains.forEach((domain, i) => {
+              domain.active = (1 - blendFactor) * domain.active + blendFactor * droplet.active[i];
+              domain.dormant = (1 - blendFactor) * domain.dormant + blendFactor * droplet.dormant[i];
+            });
+          }
+        });
+      }
+
+      return newDomains;
+    });
+
+    // Update history
+    setHistory(prev => {
+      const newHistory = { ...prev };
+      newHistory.time.push(t);
+      domains.forEach((d, i) => {
+        newHistory.active[i].push(d.active);
+        newHistory.phases[i].push(phases[i]);
+      });
+      newHistory.utilization.push(domains.reduce((sum, d) => sum + getUtilization(d), 0) / nDomains);
+      newHistory.coherence.push(getPhaseCoherence(phases));
+      newHistory.coupling.push(beta.flat().reduce((a, b) => a + b) / (nDomains * nDomains));
+      newHistory.conservation.push(Math.max(1e-10, getConservationError(domains)));
+      
+      // Keep last 200 points
+      Object.keys(newHistory).forEach(key => {
+        if(Array.isArray(newHistory[key])) {
+          if(Array.isArray(newHistory[key][0])) {
+            newHistory[key] = newHistory[key].map(arr => arr.slice(-200));
+          } else {
+            newHistory[key] = newHistory[key].slice(-200);
+          }
+        }
+      });
+      
+      return newHistory;
+    });
+
+    setT(prev => prev + dt);
+  };
+
+  // Simulation loop
+  useEffect(() => {
+    if(!isRunning) return;
+    const interval = setInterval(() => step(0.1), 50);
+    return () => clearInterval(interval);
+  }, [isRunning, domains, phases, beta, droplets, t]);
+
+  // Drawing functions
+  const drawPlot = (canvasRef, data, colors, title, yLabel, logScale = false) => {
+    const canvas = canvasRef.current;
+    if(!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+    
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(0, 0, width, height);
+    
+    if(history.time.length < 2) return;
+    
+    // Find data range
+    let minY = Infinity, maxY = -Infinity;
+    if(Array.isArray(data[0])) {
+      data.forEach(series => {
+        series.forEach(val => {
+          if(logScale) val = Math.log10(val);
+          minY = Math.min(minY, val);
+          maxY = Math.max(maxY, val);
+        });
+      });
+    } else {
+      data.forEach(val => {
+        if(logScale) val = Math.log10(val);
+        minY = Math.min(minY, val);
+        maxY = Math.max(maxY, val);
+      });
+    }
+    
+    const padding = 40;
+    const plotWidth = width - 2 * padding;
+    const plotHeight = height - 2 * padding;
+    
+    const range = maxY - minY || 1;
+    
+    // Draw axes
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padding, padding);
+    ctx.lineTo(padding, height - padding);
+    ctx.lineTo(width - padding, height - padding);
+    ctx.stroke();
+    
+    // Draw title
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(title, width / 2, 20);
+    
+    // Draw data
+    const drawSeries = (series, color) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      
+      series.forEach((val, i) => {
+        if(logScale) val = Math.log10(val);
+        const x = padding + (i / (series.length - 1)) * plotWidth;
+        const y = height - padding - ((val - minY) / range) * plotHeight;
+        if(i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      
+      ctx.stroke();
+    };
+    
+    if(Array.isArray(data[0])) {
+      data.forEach((series, i) => drawSeries(series, colors[i]));
+    } else {
+      drawSeries(data, colors);
+    }
+  };
+
+  useEffect(() => {
+    const colors = ['#FFD700', '#90EE90', '#FFA500', '#4169E1', '#DC143C'];
+    
+    drawPlot(canvasRefs.active, history.active, colors, 'Active States', 'Value');
+    drawPlot(canvasRefs.utilization, history.utilization, '#00CED1', 'Total Utilization', 'Ratio');
+    drawPlot(canvasRefs.phases, history.phases, colors, 'Domain Phases', 'Radians');
+    drawPlot(canvasRefs.coherence, history.coherence, '#9370DB', 'Phase Coherence', 'Coherence');
+    drawPlot(canvasRefs.coupling, history.coupling, '#FF69B4', 'Avg Coupling Strength', 'Beta');
+    drawPlot(canvasRefs.conservation, history.conservation, '#32CD32', 'Conservation Error', 'Error', true);
+  }, [history]);
+
+  const reset = () => {
+    setIsRunning(false);
+    setT(0);
+    setDomains(Array(5).fill(0).map(() => ({
+      active: Math.random() * 10,
+      dormant: Math.random() * 10,
+      capacity: 25,
+      priority: 0.5 + Math.random() * 1.5
+    })));
+    setPhases(Array(5).fill(0).map(() => Math.random() * 2 * Math.PI));
+    setBeta(() => {
+      const b = Array(5).fill(0).map(() => Array(5).fill(0.1));
+      for(let i = 0; i < 5; i++) b[i][i] = 0;
+      return b;
+    });
+    setHistory({
+      time: [],
+      active: [[], [], [], [], []],
+      utilization: [],
+      phases: [[], [], [], [], []],
+      coherence: [],
+      coupling: [],
+      conservation: []
+    });
+    setDroplets([]);
+  };
+
+  const avgCoupling = beta.flat().reduce((a, b) => a + b) / (nDomains * nDomains);
+  const avgUtil = domains.reduce((sum, d) => sum + getUtilization(d), 0) / nDomains;
+  const coherence = getPhaseCoherence(phases);
+  const consError = getConservationError(domains);
+
+  return (
+    <div className="w-full max-w-7xl mx-auto p-6 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
+      <div className="mb-6">
+        <h1 className="text-3xl font-bold mb-2">Multi-Domain Phase System</h1>
+        <p className="text-slate-400 text-sm">
+          5 domains • Adaptive coupling • Memory droplets • Phase synchronization
+        </p>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 mb-6 p-4 bg-slate-800/50 rounded-lg">
+        <div>
+          <div className="text-xs text-slate-400">TIME</div>
+          <div className="text-2xl font-bold text-cyan-400">{t.toFixed(1)}s</div>
+        </div>
+        <div>
+          <div className="text-xs text-slate-400">AVG UTILIZATION</div>
+          <div className="text-2xl font-bold text-green-400">{(avgUtil * 100).toFixed(0)}%</div>
+        </div>
+        <div>
+          <div className="text-xs text-slate-400">COHERENCE</div>
+          <div className="text-2xl font-bold text-purple-400">{(coherence * 100).toFixed(0)}%</div>
+        </div>
+        <div>
+          <div className="text-xs text-slate-400">DROPLETS</div>
+          <div className="text-2xl font-bold text-orange-400">{droplets.length}</div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        {['active', 'utilization', 'phases', 'coherence', 'coupling', 'conservation'].map((key, i) => (
+          <div key={key} className="bg-slate-800/30 rounded-lg p-3 border border-slate-700">
+            <canvas 
+              ref={canvasRefs[key]} 
+              width={300} 
+              height={200}
+              className="w-full"
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className="flex gap-3">
+        <button
+          onClick={() => setIsRunning(!isRunning)}
+          className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded transition-colors"
+        >
+          {isRunning ? <Pause size={16} /> : <Play size={16} />}
+          {isRunning ? 'Pause' : 'Run'}
+        </button>
+        <button
+          onClick={reset}
+          className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded transition-colors"
+        >
+          <RotateCcw size={16} />
+          Reset
+        </button>
+      </div>
+
+      <div className="mt-6 p-4 bg-slate-800/30 rounded border border-slate-700 text-xs">
+        <div className="mb-2 font-bold text-cyan-300">System Status:</div>
+        <div className="grid grid-cols-2 gap-2 text-slate-300">
+          <div>Conservation Error: {consError.toExponential(2)}</div>
+          <div>Avg Coupling: {avgCoupling.toFixed(3)}</div>
+          <div>Memory Droplets: {droplets.length} / 50</div>
+          <div>Phase Sync: {coherence > 0.7 ? 'High' : coherence > 0.4 ? 'Medium' : 'Low'}</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default MultiDomainSimulator;
