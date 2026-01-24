@@ -113,6 +113,4 @@ TailwindCSS for styling (optional, adjust UI as needed)
 License
 
 This project is dedicated to the public domain under CC0 1.0 Universal (CC0 1.0) Public Domain Dedication.
-You can copy, modify, and distribute it without restrictions.
 
-Do you want me to make that?
