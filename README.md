@@ -1,7 +1,5 @@
 # Multi-domain-simulator-
 Shakes, wobbles, sloppy,but it runs.
-Perfect! I’ve updated the README to reflect the CC0 (public domain) license instead of MIT. Here’s the revised version:
-
 
 ---
 
